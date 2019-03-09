@@ -1,9 +1,7 @@
 package worker
 
 import (
-	log "github.com/Sirupsen/logrus"
-	"github.com/radu-matei/azure-functions-golang-worker/executor"
-	"github.com/radu-matei/azure-functions-golang-worker/loader"
+	log "github.com/sirupsen/logrus"
 	"github.com/radu-matei/azure-functions-golang-worker/rpc"
 )
 
@@ -55,7 +53,7 @@ func handleFunctionLoadRequest(requestID string,
 	eventStream rpc.FunctionRpc_EventStreamClient) {
 
 	status := rpc.StatusResult_Success
-	err := loader.LoadFunc(message.FunctionLoadRequest)
+	err := client.Registry.LoadFunc(message.FunctionLoadRequest)
 	if err != nil {
 		status = rpc.StatusResult_Failure
 		log.Debugf("could not load function: %v", err)
@@ -85,7 +83,7 @@ func handleInvocationRequest(requestID string,
 	eventStream rpc.FunctionRpc_EventStreamClient) {
 
 	//log.Debugf("received invocation request: %v", message.InvocationRequest)
-	response := executor.ExecuteFunc(message.InvocationRequest, eventStream)
+	response := client.Registry.ExecuteFunc(message.InvocationRequest, eventStream)
 
 	invocationResponse := &rpc.StreamingMessage{
 		RequestId: requestID,

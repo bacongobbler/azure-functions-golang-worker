@@ -1,174 +1,261 @@
 package executor
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"plugin"
 	"reflect"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/radu-matei/azure-functions-golang-worker/azfunc"
-	"github.com/radu-matei/azure-functions-golang-worker/loader"
-	"github.com/radu-matei/azure-functions-golang-worker/logger"
 	"github.com/radu-matei/azure-functions-golang-worker/rpc"
-	"github.com/radu-matei/azure-functions-golang-worker/util"
+	log "github.com/sirupsen/logrus"
 )
 
+// Registry contains all information about user functions and how to execute them
+type Registry struct {
+	funcs map[string]*azfunc.Func
+}
+
+// NewRegistry returns a new function registry
+func NewRegistry() *Registry {
+	return &Registry{
+		funcs: map[string]*azfunc.Func{},
+	}
+}
+
+// LoadFunc populates information about the func from the compiled plugin and from parsing the source code
+func (r Registry) LoadFunc(req *rpc.FunctionLoadRequest) error {
+	log.Debugf("received function load request: %v", req)
+
+	f, err := loadFuncFromPlugin(req.Metadata)
+	if err != nil {
+		return fmt.Errorf("cannot load function from plugin: %v", err)
+	}
+
+	ins, outs, err := loadInOut(req.Metadata, f.Signature)
+	if err != nil {
+		return fmt.Errorf("cannot parse entrypoint: %v", err)
+	}
+
+	f.In = ins
+	f.Out = outs
+
+	log.Debugf("function: %v", f)
+	r.funcs[req.FunctionId] = f
+
+	return nil
+}
+
 // ExecuteFunc takes an InvocationRequest and executes the function with corresponding function ID
-func ExecuteFunc(req *rpc.InvocationRequest, eventStream rpc.FunctionRpc_EventStreamClient) (response *rpc.InvocationResponse) {
+func (r Registry) ExecuteFunc(req *rpc.InvocationRequest, eventStream rpc.FunctionRpc_EventStreamClient) (response *rpc.InvocationResponse) {
 
 	log.Debugf("\n\n\nInvocation Request: %v", req)
 
 	status := rpc.StatusResult_Success
 
-	f, ok := loader.LoadedFuncs[req.FunctionId]
-	if !ok {
-		log.Debugf("function with functionID %v not loaded", req.FunctionId)
-		status = rpc.StatusResult_Failure
-	}
-	params, outBindings, err := getFinalParams(req, f, eventStream)
-	if err != nil {
-		log.Debugf("cannot get params from request: %v", err)
-		status = rpc.StatusResult_Failure
-	}
-
-	log.Debugf("params: %v", params)
-	log.Debugf("out bindings: %v", outBindings)
-
-	output := f.Func.Call(params)[0]
-
-	b, err := json.Marshal(output.Interface())
-	if err != nil {
-		log.Debugf("failed to marshal, %v:", err)
-	}
-
-	outputData := make([]*rpc.ParameterBinding, len(outBindings))
-	i := 0
-	for k, v := range outBindings {
-
-		b, err := json.Marshal(v.Interface())
-		if err != nil {
-			log.Debugf("failed to marshal, %v:", err)
-		}
-
-		outputData[i] = &rpc.ParameterBinding{
-			Name: k,
-			Data: &rpc.TypedData{
-				Data: &rpc.TypedData_Json{
-					Json: string(b),
-				},
-			},
-		}
-	}
-
-	return &rpc.InvocationResponse{
+	ir := &rpc.InvocationResponse{
 		InvocationId: req.InvocationId,
 		Result: &rpc.StatusResult{
 			Status: status,
 		},
-		ReturnValue: &rpc.TypedData{
-			Data: &rpc.TypedData_Json{
-				Json: string(b),
-			},
+	}
+	f, ok := r.funcs[req.FunctionId]
+
+	if !ok {
+		log.Debugf("function with functionID %v not loaded", req.FunctionId)
+		ir.Result.Status = rpc.StatusResult_Failure
+		return ir
+	}
+
+	args, err := FromProto(req, f.In)
+	if err != nil {
+		log.Debugf("error caught when calling FromProto: %v", err)
+		ir.Result.Status = rpc.StatusResult_Failure
+		return ir
+	}
+
+	params := make([]reflect.Value, len(f.In))
+	for _, v := range f.In {
+		log.Debugf("kind=%v name=%v type=%v position=%v", v.Type.Kind(), v.Name, v.Type, v.Position)
+		ctx := &funcContext{
+			Context:      context.Background(),
+			functionID:   req.FunctionId,
+			invocationID: req.InvocationId,
+			eventStream:  eventStream,
+		}
+		ctxv := reflect.ValueOf(ctx).Elem()
+
+		if v.Type.Kind() == reflect.Interface && ctxv.Type().Implements(v.Type) {
+			log.Debugf("created context for %s", v.Name)
+			params[v.Position] = ctxv
+		} else {
+			params[v.Position] = args[v.Name]
+		}
+	}
+
+	output, err := f.Invoke(params)
+	if err != nil {
+		ir.Result.Status = rpc.StatusResult_Failure
+		return ir
+	}
+	o, rv, s, err := ToProto(output, f.Out)
+
+	if err != nil {
+		log.Debugf("cannot get output data from result %v", err)
+		if err != nil {
+			ir.Result.Status = rpc.StatusResult_Failure
+			return ir
+		}
+	}
+
+	ir.ReturnValue = rv
+	ir.OutputData = o
+	ir.Result = s
+	return ir
+}
+
+// funcContext implements the azfunc.Context interface
+type funcContext struct {
+	context.Context
+	functionID   string
+	invocationID string
+	eventStream  rpc.FunctionRpc_EventStreamClient
+}
+
+func (c funcContext) FunctionID() string {
+	return c.functionID
+}
+
+func (c funcContext) InvocationID() string {
+	return c.invocationID
+}
+
+func (c funcContext) Log(level int, format string, args ...interface{}) error {
+	rpcLevel := rpc.RpcLog_Level(level)
+	if rpcLevel < rpc.RpcLog_Trace {
+		rpcLevel = rpc.RpcLog_Trace
+	}
+	if rpcLevel > rpc.RpcLog_None {
+		rpcLevel = rpc.RpcLog_Critical
+	}
+
+	l := &rpc.RpcLog{
+		InvocationId: c.invocationID,
+		Level:        rpcLevel,
+		Message:      fmt.Sprintf(format, args...),
+	}
+
+	return c.eventStream.Send(&rpc.StreamingMessage{
+		Content: &rpc.StreamingMessage_RpcLog{
+			RpcLog: l,
 		},
-		OutputData: outputData,
+	})
+}
+
+// loadFuncFromPlugin takes the compiled plugin from the func's bin directory
+// then reads through reflection the in and out paramns of the entrypoint
+func loadFuncFromPlugin(metadata *rpc.RpcFunctionMetadata) (*azfunc.Func, error) {
+
+	path := fmt.Sprintf("%s/bin/%s.so", metadata.Directory, metadata.Name)
+	log.Debugf("Opening plugin binary at %s", path)
+	p, err := plugin.Open(path)
+	printPlugin(p)
+	if err != nil {
+		return nil, fmt.Errorf("cannot get .so object from path %s: %v", path, err)
+	}
+
+	symbol, err := p.Lookup(metadata.EntryPoint)
+	if err != nil {
+		return nil, fmt.Errorf("cannot look up symbol for entrypoint function %s: %v", metadata.EntryPoint, err)
+	}
+	t := reflect.TypeOf(symbol)
+	if t.Kind() != reflect.Func {
+		return nil, fmt.Errorf("symbol is not func, but %v", t.Kind())
+	}
+
+	return &azfunc.Func{
+		Handler:   reflect.ValueOf(symbol),
+		Signature: t,
+	}, nil
+}
+
+func printPlugin(f *plugin.Plugin) {
+	v := reflect.ValueOf(*f)
+	y := v.FieldByName("syms")
+	keys := y.MapKeys()
+	log.Debugf("plugin syms is %v", len(keys))
+	for i, p := range keys {
+		log.Debugf("plugin syms is %d and %v", i, p)
 	}
 }
 
-func getFinalParams(req *rpc.InvocationRequest, f *azfunc.Func, eventStream rpc.FunctionRpc_EventStreamClient) ([]reflect.Value, map[string]reflect.Value, error) {
-	args := make(map[string]reflect.Value)
-	outBindings := make(map[string]reflect.Value)
+type iterator func(int) reflect.Type
 
-	// iterate through the invocation request input data
-	// if the name of the input data is in the function bindings, then attempt to get the typed binding
-	for _, input := range req.InputData {
-		binding, ok := f.Bindings[input.Name]
-		if ok {
-			v, err := getValueFromBinding(input, binding)
-			if err != nil {
-				log.Debugf("cannot transform typed binding: %v", err)
-				return nil, nil, err
+// loadInOut loads the input and output types for a function
+func loadInOut(metadata *rpc.RpcFunctionMetadata, funcType reflect.Type) (map[string]*azfunc.FuncField, map[string]*azfunc.FuncField, error) {
+
+	var ins, outs map[string]*azfunc.FuncField
+	fs := token.NewFileSet()
+	f, err := parser.ParseFile(fs, metadata.ScriptFile, nil, parser.AllErrors)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot parse file %v: %v", metadata.ScriptFile, err)
+	}
+
+	// traverse the AST and inspect the nodes
+	// if the node is a func declaration, check if entrypoint and get input params names and types (as string)
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FuncDecl:
+			log.Debugf("found function: %v", x.Name.Name)
+			if x.Name.Name != metadata.EntryPoint {
+				log.Debugf("not function entrypoint, moving on...")
+
+				// not the entrypoint, go further into the AST
+				return true
 			}
-			args[input.Name] = v
-		} else {
-			return nil, nil, fmt.Errorf("cannot find input %v in function bindings", input.Name)
+
+			ins, err = extractFuncFields(x.Type.Params, metadata.GetBindings(), funcType.In, funcType.NumIn())
+			outs, err = extractFuncFields(x.Type.Results, metadata.GetBindings(), funcType.Out, funcType.NumOut())
+
+			// this is the entrypoint, no need to traverse the AST any longer
+			return false
+
+		default:
+			// not a func declaration, need to go further in the AST
+			return true
 		}
-	}
+	})
 
-	ctx := &azfunc.Context{
-		FunctionID:   req.FunctionId,
-		InvocationID: req.InvocationId,
-		Logger:       logger.NewLogger(eventStream, req.InvocationId),
-	}
-
-	log.Debugf("args map: %v", args)
-
-	params := make([]reflect.Value, len(f.NamedInArgs))
-	i := 0
-	for _, v := range f.NamedInArgs {
-		p, ok := args[v.Name]
-		if ok {
-			params[i] = p
-			i++
-		} else if v.Type == reflect.TypeOf((*azfunc.Context)(nil)) {
-			params[i] = reflect.ValueOf(ctx)
-			i++
-		} else {
-			b, ok := f.Bindings[v.Name]
-			if ok {
-				if b.Direction == rpc.BindingInfo_out {
-					o, err := getOutBinding(b)
-					if err != nil {
-						return nil, nil, fmt.Errorf("cannot get out binding %s: %v", v.Name, err)
-					}
-
-					params[i] = o
-					outBindings[v.Name] = o
-					i++
-				}
-			}
-		}
-	}
-
-	return params, outBindings, nil
+	return ins, outs, nil
 }
 
-// TODO - add here cases for all bindings supported by Azure Functions
-func getValueFromBinding(input *rpc.ParameterBinding, binding *rpc.BindingInfo) (reflect.Value, error) {
+func extractFuncFields(fl *ast.FieldList, bindings map[string]*rpc.BindingInfo, fi iterator, l int) (map[string]*azfunc.FuncField, error) {
+	fields := map[string]*azfunc.FuncField{}
 
-	switch binding.Type {
-	case azfunc.HTTPTriggerType:
-		switch r := input.Data.Data.(type) {
-		case *rpc.TypedData_Http:
-			h, err := util.ConvertToHTTPRequest(r.Http)
-			if err != nil {
-				return reflect.New(nil), err
+	if fl.NumFields() != l {
+		return nil, fmt.Errorf("Plugin %d and source %d nr of arguments are different", fl.NumFields(), l)
+	}
+
+	if l == 0 {
+		return fields, nil
+	}
+
+	for i, p := range fl.List {
+		t := fi(i)
+		for _, n := range p.Names {
+			log.Debugf("Found parameter: %s with type: %s", n, t.String())
+
+			fields[n.Name] = &azfunc.FuncField{
+				Name:     n.Name,
+				Type:     t,
+				Position: i,
+				Binding:  bindings[n.Name],
 			}
-			return reflect.ValueOf(h), nil
-		}
-
-	case azfunc.BlobBindingType:
-		switch d := input.Data.Data.(type) {
-		case *rpc.TypedData_String_:
-			b, err := util.ConvertToBlobInput(d)
-			if err != nil {
-				return reflect.New(nil), err
-			}
-
-			return reflect.ValueOf(b), nil
 		}
 	}
-	return reflect.New(nil), fmt.Errorf("cannot handle binding %v", binding.Type)
-}
 
-func getOutBinding(b *rpc.BindingInfo) (reflect.Value, error) {
-	switch b.Type {
-	case azfunc.BlobBindingType:
-		b := &azfunc.Blob{
-			Data: "",
-		}
-		return reflect.ValueOf(b), nil
-
-	default:
-		return reflect.New(nil), fmt.Errorf("cannot handle binding %v", b.Type)
-	}
+	return fields, nil
 }

@@ -5,36 +5,41 @@ import (
 	"fmt"
 	"io"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/radu-matei/azure-functions-golang-worker/executor"
+
 	"github.com/radu-matei/azure-functions-golang-worker/rpc"
+	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 )
 
 // ClientConfig contains all necessary configuration to connect to the Azure Functions Host
 type ClientConfig struct {
-	Host      string
-	Port      int
-	WorkerID  string
-	RequestID string
+	Host             string
+	Port             int
+	WorkerID         string
+	RequestID        string
+	MaxMessageLength int
 }
 
 // Client that listens for events from the Azure Functions host and executes Golang methods
 type Client struct {
-	Cfg *ClientConfig
-	RPC rpc.FunctionRpcClient
+	Cfg      *ClientConfig
+	RPC      rpc.FunctionRpcClient
+	Registry *executor.Registry
 }
 
 // NewClient returns a new instance of Client
 func NewClient(cfg *ClientConfig, conn *grpc.ClientConn) *Client {
-	log.Debugf("executing NewClient with config: host %s:%d, worker id %s, request id %s",
-		cfg.Host, cfg.Port, cfg.WorkerID, cfg.RequestID)
+	log.Debugf("executing NewClient with config: host %s:%d, worker id %s, request id %s, max message length %d",
+		cfg.Host, cfg.Port, cfg.WorkerID, cfg.RequestID, cfg.MaxMessageLength)
 
 	var opts []grpc.DialOption
-	opts = append(opts, grpc.WithInsecure())
+	opts = append(opts, grpc.WithInsecure(), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(cfg.MaxMessageLength)))
 
 	return &Client{
-		Cfg: cfg,
-		RPC: rpc.NewFunctionRpcClient(conn),
+		Cfg:      cfg,
+		RPC:      rpc.NewFunctionRpcClient(conn),
+		Registry: executor.NewRegistry(),
 	}
 }
 

@@ -1,0 +1,18 @@
+{
+  "entryPoint" : "Run",
+  "bindings": [
+    {
+      "name": "r",
+      "type": "httpTrigger",
+      "direction": "in",
+      "authLevel": "anonymous",
+      "route": "v2/{*path}"
+    },
+    {
+      "name": "resp",
+      "type": "http",
+      "direction": "out"
+    }
+  ],
+  "disabled": false
+}

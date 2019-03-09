@@ -11,9 +11,9 @@ How to run the sample
 In order to register Golang as a worker for the Azure Functions Runtime you need to [implement an `IWorkerProvider` as described here](https://github.com/Azure/azure-webjobs-sdk-script/wiki/Language-Extensibility).
 I already did this in a [fork of the Azure Functions Runtime and you can find all modifications here](https://github.com/Azure/azure-webjobs-sdk-script/compare/dev...radu-matei:golang-worker) and pushed a Docker image on Docker Hub based on the [Dockerfile here](https://github.com/radu-matei/azure-webjobs-sdk-script/blob/golang-worker/Dockerfile)
 
-To build the the worker and sample you need to: 
- 
-- `docker build -t azure-functions-go-sample .` 
+To build the the worker and sample you need to:
+
+- `docker build -t azure-functions-go-sample .`
 - `docker run -p 81:80 -it azure-functions-go-sample`
 
 Then, if you go to `localhost:81/api/HttpTriggerGo`, your `Run` method from the sample should be executed.
@@ -82,7 +82,7 @@ Now let's see the Golang function:
 package main
 
 import (
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"github.com/radu-matei/azure-functions-golang-worker/azfunc"
 )
 

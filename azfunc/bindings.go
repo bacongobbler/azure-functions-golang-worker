@@ -1,55 +1,138 @@
 package azfunc
 
 import (
+	"context"
 	"reflect"
+	"time"
 
-	"github.com/radu-matei/azure-functions-golang-worker/logger"
 	"github.com/radu-matei/azure-functions-golang-worker/rpc"
 )
 
-// TODO - add other binding and trigger types
-// TODO - in the end, every trigger is a binding - does it make sense to have separate types for trigger / binding?
-const (
-	// HTTPTriggerType represents a HTTP trigger in function load request from the host
-	HTTPTriggerType = "httpTrigger"
-
-	// BlobTriggerType represents a blob trigger in function load request from host
-	BlobTriggerType = "blobTrigger"
-
-	// HTTPBindingType represents a HTTP binding in function load request from the host
-	HTTPBindingType = "http"
-
-	// BlobBindingType represents a blob binding in function load request from the host
-	BlobBindingType = "blob"
-)
-
-// StringToType - Because we don't have go/types information, we need to map the type info from the AST (which is string) to the actual types - see loader.go:83
-// investiage automatically adding here all types from package azfunc
-var StringToType = map[string]reflect.Type{
-	"*azfunc.HTTPRequest": reflect.TypeOf((*HTTPRequest)(nil)),
-	"*azfunc.Context":     reflect.TypeOf((*Context)(nil)),
-	"*azfunc.Blob":        reflect.TypeOf((*Blob)(nil)),
-}
-
 // Func contains a function symbol with in and out param types
 type Func struct {
-	Func             reflect.Value
-	Bindings         map[string]*rpc.BindingInfo
-	In               []reflect.Type
-	NamedInArgs      []*Arg
-	Out              []reflect.Type
-	NamedOutBindings map[string]reflect.Value
+	Handler   reflect.Value
+	Signature reflect.Type
+	In        map[string]*FuncField
+	Out       map[string]*FuncField
+}
+
+// Invoke calls the binded function and returns the output
+func (f *Func) Invoke(params []reflect.Value) ([]reflect.Value, error) {
+	output := f.Handler.Call(params)
+	return output, nil
+}
+
+// FuncField represents a representation of a func field
+type FuncField struct {
+	Name     string
+	Type     reflect.Type
+	Binding  *rpc.BindingInfo
+	Position int
 }
 
 // Context contains the runtime context of the function
-type Context struct {
-	FunctionID   string
-	InvocationID string
-	Logger       *logger.Logger
+type Context interface {
+	context.Context
+	FunctionID() string
+	InvocationID() string
+	Log(level int, format string, args ...interface{}) error
 }
 
-// Arg represents an initial representation of a func argument
-type Arg struct {
-	Name string
-	Type reflect.Type
+// LogLevel values
+const (
+	LogTrace = iota
+	LogDebug
+	LogInformation
+	LogWarning
+	LogError
+	LogCritical
+	LogNone
+)
+
+// Timer represents a timer trigger.
+type Timer struct {
+	PastDue       bool           `json:"IsPastDue"`
+	ScheduleStats ScheduleStatus `json:"ScheduleStatus"`
+}
+
+// ScheduleStatus contains the schedule for a Timer.
+type ScheduleStatus struct {
+	Next        time.Time `json:"Next"`
+	Last        time.Time `json:"Last"`
+	LastUpdated time.Time `json:"LastUpdated"`
+}
+
+// QueueMsg represents an Azure queue message.
+type QueueMsg struct {
+	Text         string    `json:"azfuncdata"`
+	ID           string    `json:"Id"`
+	Insertion    time.Time `json:"InsertionTime"`
+	Expiration   time.Time `json:"ExpirationTime"`
+	PopReceipt   string    `json:"PopReceipt"`
+	NextVisible  time.Time `json:"NextVisibleTime"`
+	DequeueCount int       `json:"DequeueCount"`
+}
+
+// Blob contains the data from a blob as string.
+type Blob struct {
+	Content    string         `json:"azfuncdata"`
+	Name       string         `json:"name"`
+	URI        string         `json:"Uri"`
+	Properties BlobProperties `json:"Properties"`
+}
+
+// BlobProperties contains metadata about a blob.
+type BlobProperties struct {
+	Length       int       `json:"Length"`
+	ContentMD5   string    `json:"ContentMD5"`
+	ContentType  string    `json:"ContentType"`
+	ETag         string    `json:"ETag"`
+	LastModified time.Time `json:"LastModified"`
+}
+
+//EventGridEvent represents properties of an event published to an Event Grid topic.
+type EventGridEvent struct {
+	// ID - An unique identifier for the event.
+	ID string `json:"id"`
+	// Topic - The resource path of the event source.
+	Topic string `json:"topic"`
+	// Subject - A resource path relative to the topic path.
+	Subject string `json:"subject"`
+	// Data - Event data specific to the event type.
+	Data map[string]interface{} `json:"data"`
+	// EventType - The type of the event that occurred.
+	EventType string `json:"eventType"`
+	// EventTime - The time (in UTC) the event was generated.
+	EventTime time.Time `json:"eventTime"`
+	// MetadataVersion - The schema version of the event metadata.
+	MetadataVersion string `json:"metadataVersion"`
+	// DataVersion - The schema version of the data object.
+	DataVersion string `json:"dataVersion"`
+}
+
+// EventHubEvent represents properties of an event sent to an Event Hub.
+type EventHubEvent struct {
+	Data            string                 `json:"azfuncdata"`
+	PartitionKey    *string                `json:"PartitionKey"`
+	SequenceNumber  int                    `json:"SequenceNumber"`
+	Offset          int                    `json:"Offset"`
+	EnqueuedTimeUTC time.Time              `json:"EnqueuedTimeUtc"`
+	Properties      map[string]interface{} `json:"Properties"`
+}
+
+// SBMsg represents a Service Bus Brokered Message.
+type SBMsg struct {
+	Data             string                 `json:"azfuncdata"`
+	MessageID        string                 `json:"MessageId"`
+	DeliveryCount    uint32                 `json:"DeliveryCount"`
+	SequenceNumber   int64                  `json:"SequenceNumber"`
+	ExpiresAtUTC     time.Time              `json:"ExpiresAtUtc"`
+	EnqueuedTimeUTC  time.Time              `json:"EnqueuedTimeUtc"`
+	ReplyTo          *string                `json:"ReplyTo"`
+	To               *string                `json:"To"`
+	CorrelationID    *string                `json:"CorrelationId"`
+	Label            *string                `json:"Label"`
+	ContentType      *string                `json:"ContentType"`
+	DeadLetterSource *string                `json:"DeadLetterSource"`
+	UserProperties   map[string]interface{} `json:"UserProperties"`
 }

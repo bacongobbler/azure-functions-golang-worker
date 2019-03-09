@@ -4,17 +4,19 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/radu-matei/azure-functions-golang-worker/worker"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
-	flagDebug bool
-	host      string
-	port      int
-	workerID  string
-	requestID string
+	flagDebug            bool
+	host                 string
+	port                 int
+	workerID             string
+	requestID            string
+	grpcMaxMessageLength int
 )
 
 func init() {
@@ -24,6 +26,7 @@ func init() {
 	flag.IntVar(&port, "port", 0, "RPC Server Port")
 	flag.StringVar(&workerID, "workerId", "", "RPC Server Worker ID")
 	flag.StringVar(&requestID, "requestId", "", "Request ID")
+	flag.IntVar(&grpcMaxMessageLength, "grpcMaxMessageLength", math.MaxInt32, "RPC Server maximum message length")
 
 	flag.Parse()
 
@@ -43,10 +46,11 @@ func main() {
 	log.Debugf("started grpc connection...")
 
 	cfg := &worker.ClientConfig{
-		Host:      host,
-		Port:      port,
-		WorkerID:  workerID,
-		RequestID: requestID,
+		Host:             host,
+		Port:             port,
+		WorkerID:         workerID,
+		RequestID:        requestID,
+		MaxMessageLength: grpcMaxMessageLength,
 	}
 	client := worker.NewClient(cfg, conn)
 	client.StartEventStream(context.Background())

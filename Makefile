@@ -4,7 +4,7 @@ protoc_location = rpc/
 proto_out_dir = rpc/
 
 GOLANG_WORKER_BINARY = golang-worker
-SUBDIRS := $(wildcard sample/*)
+SUBDIRS := $(wildcard functions/*)
 
 .PHONY: rpc
 rpc:
@@ -19,8 +19,8 @@ dep:
 	go get -u github.com/golang/dep/... && \
 	dep ensure
 
-.PHONY : samples $(SUBDIRS)
-samples : $(SUBDIRS)
+.PHONY : functions $(SUBDIRS)
+functions : $(SUBDIRS)
 
 $(SUBDIRS) :
 	cd $@ && \
